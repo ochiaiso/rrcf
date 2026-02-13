@@ -17,6 +17,10 @@ TIME_MARGIN_RATIO = 0.05    # 時間軸の右側余裕 (5%)
 WARMUP_TIME = 30.0          # 慣らし時間 (30秒)
 ANOMALY_THRESHOLD = 3.0     # 異常判定の標準偏差倍数
 
+# 表示モード設定
+DISPLAY_MODE = "scroll"  # "full" or "scroll"
+SCROLL_WINDOW = 60.0     # スクロールモードでの表示時間幅（秒）
+
 # --- 異常検知器の初期化 ---
 vf = VibrationFeatures()
 detector = AnomalyDetector(
@@ -78,8 +82,9 @@ def on_message(client, userdata, msg):
             if len(valid_scores) > 0:
                 mean_score = np.mean(valid_scores)
                 std_score = np.std(valid_scores)
-                threshold = mean_score + ANOMALY_THRESHOLD * std_score
-                if score > threshold:
+                upper_threshold = mean_score + ANOMALY_THRESHOLD * std_score
+                # 上限を超えた場合に異常と判定
+                if score > upper_threshold:
                     is_anomaly = True
         
         message_count += 1
@@ -167,6 +172,19 @@ def update_plot(frame):
             debug_text.set_text(f'Waiting for data...\n{connection_status}')
             return line1, line2, stats_text, debug_text
         
+        # 表示範囲の計算
+        if DISPLAY_MODE == "scroll":
+            # スクロールモード：最新60秒を表示
+            latest_time = time_history[-1]
+            x_min = max(0, latest_time - SCROLL_WINDOW)
+            x_max = latest_time + SCROLL_WINDOW * 0.02  # 少し余裕を持たせる
+        else:
+            # フルモード：全データを表示
+            latest_time = time_history[-1]
+            x_min = 0
+            x_max = latest_time * (1 + TIME_MARGIN_RATIO)
+            x_max = max(x_max, 10)
+        
         # 上段グラフ（生波形）を更新
         ax1.clear()
         ax1.set_ylabel("Amplitude", fontsize=12)
@@ -189,10 +207,12 @@ def update_plot(frame):
                     segment_time = start_time + np.arange(segment_length) / FS
                     segment_data = waveform_array[start_idx:end_idx]
                     
-                    if is_anomaly:
-                        ax1.plot(segment_time, segment_data, 'r-', lw=0.5, alpha=0.8)
-                    else:
-                        ax1.plot(segment_time, segment_data, 'b-', lw=0.5, alpha=0.6)
+                    # 表示範囲内のデータのみプロット
+                    if segment_time[-1] >= x_min and segment_time[0] <= x_max:
+                        if is_anomaly:
+                            ax1.plot(segment_time, segment_data, 'r-', lw=0.5, alpha=0.8)
+                        else:
+                            ax1.plot(segment_time, segment_data, 'b-', lw=0.5, alpha=0.6)
             
             # 凡例用のダミープロット
             ax1.plot([], [], 'b-', lw=2, label='Normal', alpha=0.6)
@@ -206,9 +226,9 @@ def update_plot(frame):
         ax2.set_title("Real-time Anomaly Score (25kHz Vibration Analysis)", fontsize=14, fontweight='bold')
         ax2.grid(True, alpha=0.3)
         
-        # スコアも色分けして表示
+        # スコアも色分けして表示（表示範囲内のみ）
         for i in range(len(time_history)):
-            if i > 0:
+            if i > 0 and time_history[i] >= x_min and time_history[i-1] <= x_max:
                 # 線分を描画
                 if anomaly_flags[i] or anomaly_flags[i-1]:
                     ax2.plot([time_history[i-1], time_history[i]], 
@@ -219,11 +239,15 @@ def update_plot(frame):
                             [score_history[i-1], score_history[i]], 
                             'b-', lw=2, alpha=0.6)
         
-        # ポイントマーカーを追加
-        normal_times = [time_history[i] for i in range(len(time_history)) if not anomaly_flags[i]]
-        normal_scores = [score_history[i] for i in range(len(score_history)) if not anomaly_flags[i]]
-        anomaly_times = [time_history[i] for i in range(len(time_history)) if anomaly_flags[i]]
-        anomaly_scores = [score_history[i] for i in range(len(score_history)) if anomaly_flags[i]]
+        # ポイントマーカーを追加（表示範囲内のみ）
+        normal_times = [time_history[i] for i in range(len(time_history)) 
+                       if not anomaly_flags[i] and x_min <= time_history[i] <= x_max]
+        normal_scores = [score_history[i] for i in range(len(score_history)) 
+                        if not anomaly_flags[i] and x_min <= time_history[i] <= x_max]
+        anomaly_times = [time_history[i] for i in range(len(time_history)) 
+                        if anomaly_flags[i] and x_min <= time_history[i] <= x_max]
+        anomaly_scores = [score_history[i] for i in range(len(score_history)) 
+                         if anomaly_flags[i] and x_min <= time_history[i] <= x_max]
         
         if normal_times:
             ax2.plot(normal_times, normal_scores, 'bo', markersize=3, label='Normal', alpha=0.6)
@@ -232,32 +256,42 @@ def update_plot(frame):
         
         ax2.legend()
         
-        # 横軸の範囲を自動更新
-        if len(time_history) > 0:
-            latest_time = time_history[-1]
-            upper_limit = latest_time * (1 + TIME_MARGIN_RATIO)
-            upper_limit = max(upper_limit, 10)
-            ax1.set_xlim(0, upper_limit)
-            ax2.set_xlim(0, upper_limit)
+        # 横軸の範囲を設定
+        ax1.set_xlim(x_min, x_max)
+        ax2.set_xlim(x_min, x_max)
         
-        # 上段の縦軸の範囲を自動調整
+        # 上段の縦軸の範囲を自動調整（表示範囲内のデータのみ考慮）
         if len(waveform_data_all) > 0:
             waveform_array = np.array(waveform_data_all)
-            max_w = np.max(waveform_array)
-            min_w = np.min(waveform_array)
-            margin = (max_w - min_w) * 0.1
-            ax1.set_ylim(min_w - margin, max_w + margin)
+            # 表示範囲内のデータを抽出
+            visible_indices = []
+            for i in range(len(anomaly_flags)):
+                start_time = i * 0.1
+                end_time = start_time + 0.1
+                if start_time <= x_max and end_time >= x_min:
+                    start_idx = i * 2500
+                    end_idx = min(start_idx + 2500, len(waveform_array))
+                    visible_indices.extend(range(start_idx, end_idx))
+            
+            if visible_indices:
+                visible_data = waveform_array[visible_indices]
+                max_w = np.max(visible_data)
+                min_w = np.min(visible_data)
+                margin = (max_w - min_w) * 0.1
+                ax1.set_ylim(min_w - margin, max_w + margin)
         
-        # 下段の縦軸の範囲を自動調整
-        if score_history:
-            max_s = max(score_history)
-            min_s = min(score_history)
+        # 下段の縦軸の範囲を自動調整（表示範囲内のデータのみ考慮）
+        visible_scores = [score_history[i] for i in range(len(score_history)) 
+                         if x_min <= time_history[i] <= x_max]
+        if visible_scores:
+            max_s = max(visible_scores)
+            min_s = min(visible_scores)
             if max_s > 0:
                 ax2.set_ylim(min(0, min_s * 0.9), max_s * 1.2)
             else:
                 ax2.set_ylim(0, 15)
         
-        # 統計情報の計算と表示更新
+        # 統計情報の計算と表示更新（全データに基づく）
         if len(score_history) > 0:
             valid_scores = [s for s in score_history if s > 0.0]
             
@@ -266,10 +300,10 @@ def update_plot(frame):
                 std_score = np.std(valid_scores)
                 min_score = np.min(valid_scores)
                 max_score = np.max(valid_scores)
-                threshold = mean_score + ANOMALY_THRESHOLD * std_score
+                upper_threshold = mean_score + ANOMALY_THRESHOLD * std_score
                 anomaly_count = sum(anomaly_flags)
                 
-                stats_info = f'Mean:      {mean_score:.4f}\nStd:       {std_score:.4f}\nMin:       {min_score:.4f}\nMax:       {max_score:.4f}\nThreshold: {threshold:.4f}\nAnomalies: {anomaly_count}\nN:         {len(valid_scores)}'
+                stats_info = f'Mean:       {mean_score:.4f}\nStd:        {std_score:.4f}\nMin:        {min_score:.4f}\nMax:        {max_score:.4f}\nThreshold:  {upper_threshold:.4f}\nAnomalies:  {anomaly_count}\nN:          {len(valid_scores)}'
             else:
                 stats_info = 'Waiting for data...'
             
@@ -280,7 +314,8 @@ def update_plot(frame):
         # デバッグ情報の更新（接続状態を含む）
         connection_status = "🟢" if is_connected else "🔴"
         warmup_status = "⏱ Warmup" if current_time < WARMUP_TIME else "✓ Active"
-        debug_info = f'{connection_status} Update: #{plot_update_count}\nMsgs:   {message_count}\nLast:   {last_update_time:.1f}s\nBuffer: {len(score_history)}\nWave:   {len(waveform_data_all)} pts\n{warmup_status}'
+        mode_info = f"Mode: {DISPLAY_MODE.upper()}"
+        debug_info = f'{connection_status} Update: #{plot_update_count}\nMsgs:   {message_count}\nLast:   {last_update_time:.1f}s\nBuffer: {len(score_history)}\nWave:   {len(waveform_data_all)} pts\n{warmup_status}\n{mode_info}'
         debug_text.set_text(debug_info)
         debug_text.set_position((0.98, 0.98))
         debug_text.set_transform(ax2.transAxes)
@@ -329,7 +364,10 @@ def start_receiver():
         print(f"Configuration:")
         print(f"  Graph update interval: {UPDATE_INTERVAL_MS/1000}s")
         print(f"  Max plot points: {MAX_PLOT_POINTS} ({MAX_PLOT_POINTS * 0.1}s)")
-        print(f"  X-axis: 0 to current_time × {1 + TIME_MARGIN_RATIO}")
+        if DISPLAY_MODE == "scroll":
+            print(f"  Display mode: SCROLL (last {SCROLL_WINDOW}s)")
+        else:
+            print(f"  Display mode: FULL (0 to current_time × {1 + TIME_MARGIN_RATIO})")
         print(f"  Warmup time: {WARMUP_TIME}s")
         print(f"  Anomaly threshold: Mean + {ANOMALY_THRESHOLD}σ")
         print(f"{'='*50}\n")
